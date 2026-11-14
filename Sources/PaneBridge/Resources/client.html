@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PaneBridge</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color: #e8e8e8; }
+  #screen { position: absolute; display: block; touch-action: none; }
+  body.input #screen { cursor: none; }
+  #bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 3;
+    display: flex; gap: 10px; align-items: center; padding: 6px 12px;
+    background: rgba(28, 28, 30, .9); border-radius: 0 0 10px 10px; transition: opacity .25s; }
+  #bar.hidden { opacity: 0; pointer-events: none; }
+  #bar button { background: #3a3a3c; color: inherit; border: 0; border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer; }
+  #bar button:hover { background: #48484a; }
+  #bar label { display: flex; gap: 5px; align-items: center; cursor: pointer; user-select: none; }
+  #stats { color: #9a9a9f; font-variant-numeric: tabular-nums; min-width: 120px; }
+  #msg { position: fixed; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 24px; }
+  #msg[hidden] { display: none; }
+  #msg div { max-width: 560px; }
+  #msg code { background: #2c2c2e; padding: 2px 6px; border-radius: 4px; user-select: all; }
+</style>
+</head>
+<body class="input">
+<div id="bar">
+  <span id="stats">connecting…</span>
+  <label title="Send this PC's mouse and keyboard to the Mac"><input type="checkbox" id="optInput"> Control</label>
+  <label title="Ctrl acts as ⌘ Command, Windows key acts as Control"><input type="checkbox" id="optSwap"> Ctrl→⌘</label>
+  <button id="fs">Fullscreen</button>
+</div>
+<div id="msg"><div>Connecting to your Mac…</div></div>
+<canvas id="screen" width="16" height="9"></canvas>
+
+<script>
+"use strict";
+const canvas = document.getElementById("screen");
+const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+const msgEl = document.getElementById("msg");
+const statsEl = document.getElementById("stats");
+const bar = document.getElementById("bar");
+
+const opts = { input: true, swap: true };
+try { Object.assign(opts, JSON.parse(localStorage.getItem("panebridge") || "{}")); } catch (_) {}
+const saveOpts = () => { try { localStorage.setItem("panebridge", JSON.stringify(opts)); } catch (_) {} };
+const optInput = document.getElementById("optInput");
+const optSwap = document.getElementById("optSwap");
+optInput.checked = opts.input; optSwap.checked = opts.swap;
+document.body.classList.toggle("input", opts.input);
+optInput.onchange = () => { opts.input = optInput.checked; document.body.classList.toggle("input", opts.input); saveOpts(); };
+optSwap.onchange = () => { opts.swap = optSwap.checked; saveOpts(); };
+
+function showMsg(html) { msgEl.firstElementChild.innerHTML = html; msgEl.hidden = false; }
+
+if (!("VideoDecoder" in window)) {
+  const origin = location.origin;
+  showMsg(`<p><b>This browser blocked the video decoder</b> because the page isn't served over HTTPS.</p>
+    <p>One-time fix in Chrome or Edge:</p>
+    <p>1. Open <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code><br>
+       (in Edge: <code>edge://flags/#unsafely-treat-insecure-origin-as-secure</code>)</p>
+    <p>2. Paste <code>${origin}</code> into the box and set it to <b>Enabled</b></p>
+    <p>3. Click <b>Relaunch</b>, then reopen this page.</p>`);
+  throw new Error("WebCodecs unavailable");
+}
+
+// ---------- video ----------
+let ws = null, decoder = null, codec = null, vw = 0, vh = 0, waitingKey = true;
+let frames = 0, bytes = 0;
+
+function layout() {
+  if (!vw) return;
+  const s = Math.min(innerWidth / vw, innerHeight / vh);
+  const w = Math.floor(vw * s), h = Math.floor(vh * s);
+  Object.assign(canvas.style, { width: w + "px", height: h + "px",
+    left: Math.floor((innerWidth - w) / 2) + "px", top: Math.floor((innerHeight - h) / 2) + "px" });
+}
+addEventListener("resize", layout);
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+function requestKey() { send({ type: "keyframe" }); }
+
+function setupDecoder() {
+  if (decoder && decoder.state !== "closed") { try { decoder.close(); } catch (_) {} }
+  decoder = new VideoDecoder({
+    output(frame) {
+      ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      frame.close();
+      frames++;
+      if (!msgEl.hidden) msgEl.hidden = true;
+    },
+    error(e) {
+      console.warn("decoder error", e);
+      setTimeout(() => { setupDecoder(); requestKey(); }, 100);
+    },
+  });
+  decoder.configure({ codec, optimizeForLatency: true });  // no description => Annex-B input
+  waitingKey = true;
+}
+
+function onFrame(buf) {
+  const dv = new DataView(buf);
+  if (dv.getUint8(0) !== 1) return;
+  const key = dv.getUint8(1) === 1;
+  const timestamp = Number(dv.getBigUint64(2));
+  bytes += buf.byteLength;
+  if (!decoder || decoder.state !== "configured") return;
+  if (waitingKey && !key) return;
+  if (!key && decoder.decodeQueueSize > 3) {   // decoder falling behind: skip to next keyframe
+    waitingKey = true; requestKey(); return;
+  }
+  waitingKey = false;
+  decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp, data: new Uint8Array(buf, 10) }));
+}
+
+function connect() {
+  const port = Number(location.port || 80) + 1;
+  ws = new WebSocket(`ws://${location.hostname}:${port}`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { statsEl.textContent = "connected"; };
+  ws.onmessage = (e) => {
+    if (typeof e.data !== "string") return onFrame(e.data);
+    const m = JSON.parse(e.data);
+    if (m.type === "config") {
+      codec = m.codec; vw = m.width; vh = m.height;
+      canvas.width = vw; canvas.height = vh;
+      layout(); setupDecoder(); requestKey();
+    }
+  };
+  ws.onclose = () => {
+    statsEl.textContent = "reconnecting…";
+    showMsg("Lost connection to the Mac. Reconnecting…");
+    setTimeout(connect, 1000);
+  };
+}
+connect();
+
+setInterval(() => {
+  if (ws && ws.readyState === WebSocket.OPEN && vw)
+    statsEl.textContent = `${vw}×${vh} · ${frames} fps · ${(bytes * 8 / 1e6).toFixed(1)} Mbps`;
+  frames = 0; bytes = 0;
+}, 1000);
+
+// ---------- toolbar ----------
+let barTimer = 0;
+function pokeBar() {
+  bar.classList.remove("hidden");
+  clearTimeout(barTimer);
+  barTimer = setTimeout(() => { if (!bar.matches(":hover")) bar.classList.add("hidden"); }, 2500);
+}
+addEventListener("pointermove", (e) => { if (e.clientY < 48) pokeBar(); });
+bar.addEventListener("pointerleave", pokeBar);
+pokeBar();
+
+document.getElementById("fs").onclick = async () => {
+  if (document.fullscreenElement) return document.exitFullscreen();
+  await document.documentElement.requestFullscreen();
+  // In fullscreen, also capture keys like the Windows key / Alt+Tab (Chrome/Edge only).
+  try { if (opts.input) await navigator.keyboard.lock(); } catch (_) {}
+};
+
+// ---------- input ----------
+function mods(e) {
+  return opts.swap
+    ? { cmd: e.ctrlKey, ctrl: e.metaKey, alt: e.altKey, shift: e.shiftKey }
+    : { cmd: e.metaKey, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey };
+}
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+}
+
+let lastDown = { t: 0, x: 0, y: 0, clicks: 0 };
+canvas.addEventListener("pointerdown", (e) => {
+  if (!opts.input || !vw) return;
+  e.preventDefault();
+  canvas.setPointerCapture(e.pointerId);
+  const now = performance.now();
+  const near = Math.abs(e.clientX - lastDown.x) < 5 && Math.abs(e.clientY - lastDown.y) < 5;
+  lastDown = { t: now, x: e.clientX, y: e.clientY, clicks: now - lastDown.t < 400 && near ? lastDown.clicks + 1 : 1 };
+  send({ type: "mouse", action: "down", button: e.button, clicks: lastDown.clicks, ...pos(e), mods: mods(e) });
+});
+canvas.addEventListener("pointerup", (e) => {
+  if (!opts.input || !vw) return;
+  send({ type: "mouse", action: "up", button: e.button, clicks: lastDown.clicks, ...pos(e), mods: mods(e) });
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (!opts.input || !vw || !ws || ws.bufferedAmount > 65536) return;
+  send({ type: "mouse", action: "move", ...pos(e), mods: mods(e) });
+});
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+canvas.addEventListener("wheel", (e) => {
+  if (!opts.input || !vw) return;
+  e.preventDefault();
+  const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1;
+  send({ type: "wheel", dx: e.deltaX * k, dy: e.deltaY * k, ...pos(e), mods: mods(e) });
+}, { passive: false });
+
+const MODIFIER_CODES = /^(Shift|Control|Alt|Meta|OS)(Left|Right)?$/;
+function onKey(e) {
+  if (!opts.input || !vw) return;
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLButtonElement) return;
+  e.preventDefault();
+  if (MODIFIER_CODES.test(e.code)) return;  // sent as flags with other keys
+  send({ type: "key", action: e.type === "keydown" ? "down" : "up", code: e.code, mods: mods(e) });
+}
+addEventListener("keydown", onKey);
+addEventListener("keyup", onKey);
+</script>
+</body>
+</html>
