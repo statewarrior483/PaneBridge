@@ -100,7 +100,16 @@ struct SetupGuideView: View {
                  detail: "Lets your PC's mouse and keyboard control the Mac. Skip it if you'll only use the Mac's own trackpad and keyboard.",
                  status: state.accessibility ? .done : .optional) {
             if !state.accessibility {
-                Button("Allow Accessibility…") { state.requestAccessibility() }
+                HStack {
+                    Button("Allow Accessibility…") { state.requestAccessibility() }
+                    Button("Relaunch PaneBridge") { relaunchApp() }
+                }
+                HStack(spacing: 4) {
+                    Text("Already on, but still not working (common after an update)?")
+                        .font(.caption).foregroundColor(.secondary)
+                    Button("Reset permission") { state.resetAccessibility() }
+                        .buttonStyle(.link).font(.caption)
+                }
             }
         }
     }

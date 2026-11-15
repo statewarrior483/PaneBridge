@@ -150,14 +150,25 @@ final class AppState: ObservableObject {
         _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
     }
 
-    /// After an app update macOS can keep a stale entry that looks enabled but isn't.
+    /// After an app update macOS can keep a stale entry that looks enabled but isn't
+    /// (it was saved for a different signature). Clearing it lets the app be added fresh.
     func resetScreenRecording() {
+        resetPermission("ScreenCapture")
+        requestScreenRecording()
+    }
+
+    func resetAccessibility() {
+        resetPermission("Accessibility")
+        requestAccessibility()
+        openPrivacySettings("Privacy_Accessibility")
+    }
+
+    private func resetPermission(_ service: String) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-        task.arguments = ["reset", "ScreenCapture", bundleID]
+        task.arguments = ["reset", service, bundleID]
         try? task.run()
         task.waitUntilExit()
-        requestScreenRecording()
     }
 
     func openPrivacySettings(_ pane: String) {
