@@ -1,14 +1,11 @@
 import Foundation
 import CoreGraphics
-import ApplicationServices
-import AppKit
-import VirtualDisplayKit
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
 // MARK: Options
 
-struct Options {
+struct Options: Equatable {
     var width = 1920
     var height = 1080
     var fps = 60
@@ -33,15 +30,37 @@ struct Options {
       --position P     right|left|above|below main display (default right)
       --port N         HTTP port; WebSocket uses N+1 (default 8080)
       --no-input       ignore mouse/keyboard from the viewer
+
+    Settings saved from the app's setup window are used as defaults.
     """
 
-    static func parse() -> Options {
+    /// Settings saved by the app's setup window.
+    static func saved() -> Options {
         var o = Options()
-        // Settings picked from the menu bar (command-line flags still win).
         let d = UserDefaults.standard
         if d.integer(forKey: "width") > 0 { o.width = d.integer(forKey: "width") }
         if d.integer(forKey: "height") > 0 { o.height = d.integer(forKey: "height") }
+        if d.integer(forKey: "fps") > 0 { o.fps = d.integer(forKey: "fps") }
+        if d.double(forKey: "bitrate") > 0 { o.bitrateMbps = d.double(forKey: "bitrate") }
+        if let p = d.string(forKey: "position") { o.position = p }
+        if d.object(forKey: "input") != nil { o.input = d.bool(forKey: "input") }
         o.hiDPI = d.bool(forKey: "hidpi")
+        return o
+    }
+
+    func save() {
+        let d = UserDefaults.standard
+        d.set(width, forKey: "width")
+        d.set(height, forKey: "height")
+        d.set(fps, forKey: "fps")
+        d.set(bitrateMbps, forKey: "bitrate")
+        d.set(position, forKey: "position")
+        d.set(input, forKey: "input")
+        d.set(hiDPI, forKey: "hidpi")
+    }
+
+    static func parse() -> Options {
+        var o = saved()
         var args = CommandLine.arguments.dropFirst().makeIterator()
         func next(_ flag: String) -> String {
             guard let v = args.next() else { fail("\(flag) needs a value") }
@@ -68,12 +87,15 @@ struct Options {
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("Error: \(message)\n".utf8))
-    if runningAsApp {
-        if Thread.isMainThread { showAlertAndExit("PaneBridge couldn't start", message) }
-        DispatchQueue.main.sync { showAlertAndExit("PaneBridge couldn't start", message) }
-    }
     exit(1)
 }
+
+struct PaneBridgeError: LocalizedError {
+    let errorDescription: String?
+    init(_ message: String) { errorDescription = message }
+}
+
+// MARK: Networking helpers
 
 func lanAddresses() -> [String] {
     var result: [String] = []
@@ -87,10 +109,27 @@ func lanAddresses() -> [String] {
         var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
         if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
             let ip = String(cString: host)
-            if !ip.hasPrefix("169.254.") { result.append(ip) }
+            if !ip.hasPrefix("169.254.") && !result.contains(ip) { result.append(ip) }
         }
     }
     return result
+}
+
+struct ViewerURL: Identifiable, Equatable {
+    let url: String
+    let isTailscale: Bool
+    var id: String { url }
+    var label: String { isTailscale ? "Tailscale" : "Local network" }
+}
+
+/// Viewer URLs for every usable network interface, Tailscale (100.64.0.0/10) first.
+func viewerURLs(port: UInt16) -> [ViewerURL] {
+    lanAddresses().map { ip in
+        let parts = ip.split(separator: ".").compactMap { Int($0) }
+        let tailscale = parts.count == 4 && parts[0] == 100 && (64..<128).contains(parts[1])
+        return ViewerURL(url: "http://\(ip):\(port)", isTailscale: tailscale)
+    }
+    .sorted { $0.isTailscale && !$1.isTailscale }
 }
 
 /// Puts the virtual display next to the main display so the mouse can cross over.
@@ -110,86 +149,25 @@ func arrange(_ id: CGDirectDisplayID, _ o: Options) {
     CGCompleteDisplayConfiguration(config, .forSession)
 }
 
-// MARK: Startup
-
-let options = Options.parse()
-
-if !CGPreflightScreenCaptureAccess() {
-    CGRequestScreenCaptureAccess()
-    print("""
-    ⚠️  PaneBridge needs Screen Recording permission.
-       System Settings → Privacy & Security → Screen & System Audio Recording → enable your
-       terminal app (or PaneBridge.app), then quit and reopen it.
-    """)
-}
-if options.input && !AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary) {
-    print("""
-    ⚠️  Mouse/keyboard from the viewer needs Accessibility permission.
-       System Settings → Privacy & Security → Accessibility → enable your terminal app.
-       (Streaming works without it.)
-    """)
-}
-
-// Inside PaneBridge.app the page is in Contents/Resources; for `swift run` it's in the SwiftPM bundle.
-guard let pageURL = Bundle.main.url(forResource: "client", withExtension: "html")
-        ?? Bundle.module.url(forResource: "client", withExtension: "html"),
-      let page = try? Data(contentsOf: pageURL) else { fail("viewer page missing from bundle") }
-
-guard let virtualDisplay = PBVirtualDisplay(name: "PaneBridge Display", width: UInt32(options.width),
-                                            height: UInt32(options.height), refreshRate: Double(options.fps),
-                                            hiDPI: options.hiDPI) else {
-    fail("Could not create the virtual display. Is PaneBridge already running (in Terminal or the menu bar)? Quit it and try again.")
-}
-let displayID = virtualDisplay.displayID
-print("Created virtual display #\(displayID): \(options.width)x\(options.height)\(options.hiDPI ? " (Retina)" : "")")
-DispatchQueue.main.asyncAfter(deadline: .now() + 1) { arrange(displayID, options) }
-
-let encoder: H264Encoder
-do {
-    encoder = try H264Encoder(width: options.pixelWidth, height: options.pixelHeight, fps: options.fps,
-                              bitrate: Int(options.bitrateMbps * 1_000_000))
-} catch { fail(error.localizedDescription) }
-
-let server = StreamServer(page: page, width: options.pixelWidth, height: options.pixelHeight)
-let capturer = DisplayCapturer(displayID: displayID, pixelWidth: options.pixelWidth,
-                               pixelHeight: options.pixelHeight, fps: options.fps, encoder: encoder)
-let injector = options.input ? InputInjector(displayID: displayID) : nil
-let inputQueue = DispatchQueue(label: "panebridge.input", qos: .userInteractive)
-
-encoder.onCodec = { server.setCodec($0) }
-encoder.onFrame = { server.broadcast(frame: $0, isKey: $1, timestamp: $2) }
-server.onKeyframeRequest = { capturer.requestKeyframe() }
-server.onInput = { msg in inputQueue.async { injector?.handle(msg) } }
-
-do { try server.start(port: options.port) } catch { fail("could not start server: \(error)") }
-
-Task {
-    do {
-        try await capturer.start()
-    } catch {
-        fail("""
-        \(error.localizedDescription)
-
-        If this is a permissions error: open System Settings → Privacy & Security → \
-        Screen & System Audio Recording, turn on \(runningAsApp ? "PaneBridge" : "your terminal app"), then open it again.
-        """)
+func loadViewerPage() throws -> Data {
+    // Inside PaneBridge.app the page is in Contents/Resources; for `swift run` it's in the SwiftPM bundle.
+    guard let url = Bundle.main.url(forResource: "client", withExtension: "html")
+            ?? Bundle.module.url(forResource: "client", withExtension: "html") else {
+        throw PaneBridgeError("Viewer page missing from the app bundle")
     }
-    print("\nOn your Windows PC, open Chrome or Edge and go to:")
-    for (url, label) in viewerURLs(port: options.port) { print("   \(url)   \(label)") }
-    print("\n(Both computers must be on the same network. Press Ctrl+C here to stop.)\n")
+    return try Data(contentsOf: url)
 }
 
-signal(SIGINT, SIG_IGN)
-let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-sigint.setEventHandler {
-    print("\nStopping, removing virtual display.")
-    exit(0)
-}
-sigint.resume()
+// MARK: Entry point
 
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)  // menu-bar only, no Dock icon
-let menuBar = MenuBarController(options: options)
-withExtendedLifetime((virtualDisplay, menuBar)) {
-    app.run()
+/// True when launched as PaneBridge.app rather than the bare binary from Terminal.
+let runningAsApp = Bundle.main.bundlePath.hasSuffix(".app")
+
+let launchOptions = Options.parse()
+if let dir = ProcessInfo.processInfo.environment["PANEBRIDGE_SNAPSHOT"] {
+    renderSnapshots(to: dir, options: launchOptions)
+} else if runningAsApp {
+    runMenuBarApp(launchOptions)
+} else {
+    runCommandLine(launchOptions)
 }

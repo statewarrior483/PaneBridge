@@ -4,6 +4,11 @@ Use a Windows PC (or any computer with Chrome or Edge) as an **extra monitor for
 
 PaneBridge adds a real virtual display to macOS, captures it, encodes it with the Mac's hardware H.264 encoder and streams it to a web page. On the Windows side you just open a URL. Nothing to install there.
 
+<p align="center">
+  <img src="docs/setup.png" width="420" alt="PaneBridge setup guide">
+  <img src="docs/settings.png" width="420" alt="PaneBridge settings">
+</p>
+
 ```
 Mac                                                     Windows PC
 ┌───────────────────────────────────────────┐           ┌────────────────────────┐
@@ -22,8 +27,12 @@ Mac                                                     Windows PC
 
 1. Download `PaneBridge-x.y.z.dmg` from the [Releases](../../releases) page and drag **PaneBridge** into Applications.
 2. The app isn't notarized by Apple, so the first time you open it, **right-click → Open → Open**. If macOS still blocks it, go to System Settings → Privacy & Security, scroll down and click **Open Anyway**.
-3. A display icon appears in the **menu bar**. Click it to see the URL to open on your PC, change the resolution or quit.
-4. Grant **Screen & System Audio Recording** to PaneBridge when asked, then quit it from the menu bar and open it again. Granting **Accessibility** as well is optional and lets the PC's mouse and keyboard control the Mac.
+3. The **setup guide** opens and walks you through everything: permissions, network, the one-time browser setting on your PC, and connecting. It ticks each step off as you go.
+4. After that, PaneBridge lives in the **menu bar** (display icon). From there you can copy the PC address, reopen the **Setup Guide**, open **Settings** or quit.
+
+**Settings** (menu bar → Settings…): resolution, Retina, which side of your Mac the display sits on, frame rate (24–120 fps), bitrate (4–80 Mbps) and whether the PC's mouse and keyboard can control the Mac. Changes apply in a couple of seconds, and the PC reconnects by itself.
+
+> **After updating PaneBridge** macOS may treat it as a new app, so the Screen Recording switch can look on without working. The setup guide flags this; click **Reset permission**, allow it again and relaunch.
 
 ### Option B: build from source
 
@@ -32,7 +41,9 @@ cd PaneBridge   # the folder you cloned or downloaded
 swift build -c release
 ```
 
-## 2. Run (from source)
+## 2. Run from Terminal (optional)
+
+Running the bare binary gives a headless version that logs to the terminal and takes the same settings as flags. Settings saved in the app are used as defaults.
 
 ```bash
 .build/release/PaneBridge
@@ -95,7 +106,8 @@ Windows may ask to allow the browser through the firewall. On the Mac, allow inc
 ## Building the DMG
 
 ```bash
-./scripts/make-dmg.sh 0.1.0   # -> dist/PaneBridge-0.1.0.dmg (universal: Apple Silicon + Intel)
+./scripts/make-dmg.sh 0.2.0   # -> dist/PaneBridge-0.2.0.dmg (universal: Apple Silicon + Intel)
+PANEBRIDGE_SNAPSHOT=docs .build/release/PaneBridge   # re-render the screenshots above
 ```
 
 ## Tips

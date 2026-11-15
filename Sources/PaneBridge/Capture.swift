@@ -15,6 +15,8 @@ final class DisplayCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
     /// ScreenCaptureKit only delivers frames when the screen changes, so keep the
     /// latest one around to answer keyframe requests on a static screen.
     private var lastFrame: CVPixelBuffer?
+    var onStop: ((String) -> Void)?
+    private var stopping = false
 
     init(displayID: CGDirectDisplayID, pixelWidth: Int, pixelHeight: Int, fps: Int, encoder: H264Encoder) {
         self.displayID = displayID
@@ -73,8 +75,15 @@ final class DisplayCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
         encoder.encode(pixelBuffer)
     }
 
+    func stop() {
+        stopping = true
+        stream?.stopCapture { _ in }
+        stream = nil
+    }
+
     func stream(_ stream: SCStream, didStopWithError error: Error) {
+        guard !stopping else { return }
         print("Capture stopped: \(error.localizedDescription)")
-        exit(1)
+        onStop?(error.localizedDescription)
     }
 }

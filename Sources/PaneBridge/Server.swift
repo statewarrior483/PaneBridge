@@ -6,6 +6,7 @@ import Network
 final class StreamServer {
     var onKeyframeRequest: (() -> Void)?
     var onInput: (([String: Any]) -> Void)?
+    var onViewerCountChanged: ((Int) -> Void)?
 
     private let queue = DispatchQueue(label: "panebridge.server", qos: .userInteractive)
     private let page: Data
@@ -53,6 +54,15 @@ final class StreamServer {
         wsListener = wsl
     }
 
+    func stop() {
+        queue.sync {
+            httpListener?.cancel()
+            wsListener?.cancel()
+            for c in clients.values { c.connection.cancel() }
+            clients.removeAll()
+        }
+    }
+
     // MARK: HTTP (just the one page)
 
     private func serveHTTP(_ conn: NWConnection) {
@@ -82,10 +92,14 @@ final class StreamServer {
             switch state {
             case .ready:
                 print("Viewer connected: \(conn.endpoint)")
+                self.onViewerCountChanged?(self.clients.count)
                 if let codec { self.sendConfig(codec, to: client) }
                 self.onKeyframeRequest?()
             case .failed, .cancelled:
-                if self.clients.removeValue(forKey: id) != nil { print("Viewer disconnected: \(conn.endpoint)") }
+                if self.clients.removeValue(forKey: id) != nil {
+                    print("Viewer disconnected: \(conn.endpoint)")
+                    self.onViewerCountChanged?(self.clients.count)
+                }
             default: break
             }
         }
