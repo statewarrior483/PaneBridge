@@ -9,7 +9,7 @@ struct Options: Equatable {
     var width = 1920
     var height = 1080
     var fps = 60
-    var bitrateMbps = 20.0
+    var bitrateMbps = 12.0
     var hiDPI = false
     var port: UInt16 = 8080
     var input = true
@@ -25,7 +25,7 @@ struct Options: Equatable {
       --width N        display width in points      (default 1920)
       --height N       display height in points     (default 1080)
       --fps N          frame rate                   (default 60)
-      --bitrate N      video bitrate in Mbps        (default 20)
+      --bitrate N      video bitrate in Mbps        (default 12)
       --hidpi          Retina mode (renders at 2x; needs a high-res viewer screen)
       --position P     right|left|above|below main display (default right)
       --port N         HTTP port; WebSocket uses N+1 (default 8080)

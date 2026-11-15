@@ -7,6 +7,23 @@ final class StreamServer {
     var onKeyframeRequest: (() -> Void)?
     var onInput: (([String: Any]) -> Void)?
     var onViewerCountChanged: ((Int) -> Void)?
+    /// Called (on the server queue) when a backed-up viewer has caught up again.
+    var onDrained: (() -> Void)?
+
+    /// True while any viewer still has a frame waiting to be sent. The capturer
+    /// checks this and skips encoding instead of piling frames into the socket,
+    /// which keeps latency low without breaking the H.264 reference chain.
+    var isBackedUp: Bool {
+        congestionLock.lock(); defer { congestionLock.unlock() }
+        return backedUp
+    }
+    private let congestionLock = NSLock()
+    private var backedUp = false
+    private func updateCongestion() {
+        let now = clients.values.contains { $0.inFlight >= sendWindow }
+        congestionLock.lock(); let was = backedUp; backedUp = now; congestionLock.unlock()
+        if was && !now { onDrained?() }
+    }
 
     private let queue = DispatchQueue(label: "panebridge.server", qos: .userInteractive)
     private let page: Data
@@ -25,7 +42,9 @@ final class StreamServer {
     }
 
     /// Frames allowed in the send queue before we start dropping (prevents lag build-up on slow Wi-Fi).
-    private let maxInFlight = 4
+    private let maxInFlight = 12
+    /// Frames allowed on the wire per viewer before new frames are skipped at the encoder.
+    private let sendWindow = 2
 
     init(page: Data, width: Int, height: Int) {
         self.page = page
@@ -170,8 +189,12 @@ final class StreamServer {
                 let meta = NWProtocolWebSocket.Metadata(opcode: .binary)
                 let ctx = NWConnection.ContentContext(identifier: "frame", metadata: [meta])
                 client.connection.send(content: message, contentContext: ctx, isComplete: true,
-                                       completion: .contentProcessed { _ in client.inFlight -= 1 })
+                                       completion: .contentProcessed { [weak self] _ in
+                                           client.inFlight -= 1
+                                           self?.updateCongestion()
+                                       })
             }
+            updateCongestion()
             if wantKey { onKeyframeRequest?() }
         }
     }

@@ -15,6 +15,9 @@ final class Engine {
     private var capturer: DisplayCapturer?
     private var injector: InputInjector?
     private let inputQueue = DispatchQueue(label: "panebridge.input", qos: .userInteractive)
+    /// Keeps macOS from App-Napping a menu-bar app with no visible windows, which
+    /// throttles its timers and threads and shows up as stutter.
+    private var activity: NSObjectProtocol?
 
     init(options: Options) {
         self.options = options
@@ -48,6 +51,11 @@ final class Engine {
             server.onInput = { msg in inputQueue.async { injector?.handle(msg) } }
             server.onViewerCountChanged = { [weak self] in self?.onViewerCountChanged?($0) }
             capturer.onStop = { [weak self] in self?.onStopped?($0) }
+            capturer.shouldHoldFrames = { [weak server] in server?.isBackedUp ?? false }
+            server.onDrained = { [weak capturer] in capturer?.flushHeldFrame() }
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .latencyCritical],
+                reason: "Streaming the PaneBridge display")
 
             self.encoder = encoder
             self.server = server
@@ -72,6 +80,8 @@ final class Engine {
 
     /// Tears everything down; the virtual display disappears when released.
     func stop() {
+        if let activity { ProcessInfo.processInfo.endActivity(activity) }
+        activity = nil
         capturer?.stop()
         server?.stop()
         capturer = nil

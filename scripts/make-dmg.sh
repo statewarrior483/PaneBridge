@@ -35,8 +35,28 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "==> Ad-hoc signing (not notarized)"
-codesign --force --deep --sign - "$APP"
+# Sign with a stable self-signed certificate if one is set up (scripts/setup-signing.sh).
+# macOS ties Screen Recording / Accessibility permissions to the signature; with ad-hoc
+# signing every build looks like a brand-new app and permissions must be granted again.
+SIGN_DIR="$HOME/Library/Application Support/PaneBridge-Signing"
+SIGN_KC="$SIGN_DIR/signing.keychain-db"
+if [ -f "$SIGN_KC" ] && [ -f "$SIGN_DIR/pw" ]; then
+  echo "==> Signing with the PaneBridge self-signed certificate (not notarized)"
+  security unlock-keychain -p "$(cat "$SIGN_DIR/pw")" "$SIGN_KC"
+  IDENTITY=$(security find-identity -p codesigning "$SIGN_KC" | awk '/PaneBridge Self-Signed/ {print $2; exit}')
+  # codesign only finds identities in the search list, so add the keychain just for this call.
+  ORIG_KCS=$(security list-keychains -d user | tr -d '"' | xargs)
+  restore_keychains() { security list-keychains -d user -s $ORIG_KCS; }
+  trap restore_keychains EXIT
+  security list-keychains -d user -s $ORIG_KCS "$SIGN_KC"
+  codesign --force --deep --sign "$IDENTITY" "$APP"
+  restore_keychains
+  trap - EXIT
+else
+  echo "==> Ad-hoc signing (run scripts/setup-signing.sh so permissions survive updates)"
+  codesign --force --deep --sign - "$APP"
+fi
+codesign -dr - "$APP" 2>&1 | grep designated
 
 echo "==> Creating $DMG"
 STAGE="$(mktemp -d)"

@@ -32,7 +32,7 @@ Mac                                                     Windows PC
 
 **Settings** (menu bar → Settings…): resolution, Retina, which side of your Mac the display sits on, frame rate (24–120 fps), bitrate (4–80 Mbps) and whether the PC's mouse and keyboard can control the Mac. Changes apply in a couple of seconds, and the PC reconnects by itself.
 
-> **After updating PaneBridge** macOS may treat it as a new app, so the Screen Recording switch can look on without working. The setup guide flags this; click **Reset permission**, allow it again and relaunch.
+> **Permissions now survive updates (0.2.2+).** Builds are signed with the same certificate, so macOS recognizes each update as the same app. When upgrading **from 0.2.1 or earlier**, grant Screen Recording one last time. If the switch already looks on, use **Reset permission** in the setup guide.
 
 ### Option B: build from source
 
@@ -64,7 +64,7 @@ Press **Ctrl+C** to stop. The virtual display disappears.
 |---|---|---|
 | `--width` / `--height` | 1920 × 1080 | Match your Windows monitor. |
 | `--fps` | 60 | |
-| `--bitrate` | 20 | Mbps. Lower it (8–12) on weak Wi-Fi. |
+| `--bitrate` | 12 | Mbps. Lower it (8–12) on weak Wi-Fi. |
 | `--hidpi` | off | Retina mode. Renders at 2× (e.g. 1280×720 → 2560×1440 pixels). Use with a high-res PC screen. |
 | `--position` | right | `left`, `above`, `below` |
 | `--port` | 8080 | WebSocket uses port + 1 |
@@ -106,7 +106,8 @@ Windows may ask to allow the browser through the firewall. On the Mac, allow inc
 ## Building the DMG
 
 ```bash
-./scripts/make-dmg.sh 0.2.0   # -> dist/PaneBridge-0.2.0.dmg (universal: Apple Silicon + Intel)
+./scripts/setup-signing.sh    # once: private self-signed signing certificate, kept outside the repo
+./scripts/make-dmg.sh 0.2.2   # -> dist/PaneBridge-0.2.2.dmg (universal: Apple Silicon + Intel)
 PANEBRIDGE_SNAPSHOT=docs .build/release/PaneBridge   # re-render the screenshots above
 ```
 
@@ -120,7 +121,7 @@ PANEBRIDGE_SNAPSHOT=docs .build/release/PaneBridge   # re-render the screenshots
 
 - Uses `CGVirtualDisplay`, a private macOS API (the same one other virtual-monitor apps use). It works for personal use but couldn't ship on the App Store and could break in a future macOS.
 - Video is unencrypted on a plain LAN connection, so don't use the `192.168.x.x` URL on public Wi-Fi. Over Tailscale it's encrypted.
-- The app is ad-hoc signed, not notarized. macOS asks for permissions again after each update.
+- The app is signed with a self-signed certificate, not notarized by Apple, so the first launch needs right-click → Open.
 - Possible next steps: a menu-bar app wrapper, HTTPS with a self-signed certificate (removes the flag step), a native Windows viewer, USB-C/Thunderbolt networking, audio.
 
 [Buy me a Coffee!](https://buymeacoffee.com/trivikrishnan)

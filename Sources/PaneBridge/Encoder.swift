@@ -30,8 +30,10 @@ final class H264Encoder {
         set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
         set(kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
         set(kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber)
-        set(kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 4) as CFNumber)
-        set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 4 as CFNumber)
+        // The stream runs over TCP (no packet loss) and viewers ask for keyframes when they
+        // need one, so periodic keyframes would only cause big bursts that show up as stutter.
+        set(kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 30) as CFNumber)
+        set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 30 as CFNumber)
         // Cap bursts at 2x the average over one second.
         set(kVTCompressionPropertyKey_DataRateLimits, [bitrate * 2 / 8, 1] as CFArray)
         VTCompressionSessionPrepareToEncodeFrames(session)

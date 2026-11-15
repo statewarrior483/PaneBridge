@@ -110,7 +110,7 @@ function onFrame(buf) {
   bytes += buf.byteLength;
   if (!decoder || decoder.state !== "configured") return;
   if (waitingKey && !key) return;
-  if (!key && decoder.decodeQueueSize > 3) {   // decoder falling behind: skip to next keyframe
+  if (!key && decoder.decodeQueueSize > 10) {  // decoder badly behind (e.g. tab was hidden): resync on a keyframe
     waitingKey = true; requestKey(); return;
   }
   waitingKey = false;

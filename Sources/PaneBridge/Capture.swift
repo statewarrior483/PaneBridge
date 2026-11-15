@@ -16,6 +16,10 @@ final class DisplayCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
     /// latest one around to answer keyframe requests on a static screen.
     private var lastFrame: CVPixelBuffer?
     var onStop: ((String) -> Void)?
+    /// Returns true when the network is backed up; the frame is then held back.
+    var shouldHoldFrames: (() -> Bool)?
+    /// A newer frame was held back and still needs to be sent once the network drains.
+    private var holding = false
     private var stopping = false
 
     init(displayID: CGDirectDisplayID, pixelWidth: Int, pixelHeight: Int, fps: Int, encoder: H264Encoder) {
@@ -46,7 +50,7 @@ final class DisplayCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         config.showsCursor = true
-        config.queueDepth = 5
+        config.queueDepth = 3
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
@@ -72,7 +76,21 @@ final class DisplayCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
               let pixelBuffer = sb.imageBuffer
         else { return }
         lastFrame = pixelBuffer
+        if shouldHoldFrames?() == true {
+            holding = true   // skip this one; the newest frame is sent when the viewer catches up
+            return
+        }
+        holding = false
         encoder.encode(pixelBuffer)
+    }
+
+    /// The viewer caught up: send the newest frame we held back, if any.
+    func flushHeldFrame() {
+        queue.async { [self] in
+            guard holding, let lastFrame else { return }
+            holding = false
+            encoder.encode(lastFrame)
+        }
     }
 
     func stop() {
