@@ -123,4 +123,4 @@ PANEBRIDGE_SNAPSHOT=docs .build/release/PaneBridge   # re-render the screenshots
 - The app is ad-hoc signed, not notarized. macOS asks for permissions again after each update.
 - Possible next steps: a menu-bar app wrapper, HTTPS with a self-signed certificate (removes the flag step), a native Windows viewer, USB-C/Thunderbolt networking, audio.
 
-[Buy me a Coffee!](buymeacoffee.com/trivikrishnan)
+[Buy me a Coffee!](https://buymeacoffee.com/trivikrishnan)
