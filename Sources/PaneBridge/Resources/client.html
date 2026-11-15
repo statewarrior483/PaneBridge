@@ -8,10 +8,12 @@
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
     font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color: #e8e8e8; }
-  #screen { position: absolute; display: block; touch-action: none; }
-  body.input #screen { cursor: none; }
+  #stage { position: absolute; outline: none; touch-action: none; }
+  #stage video, #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #stage [hidden] { display: none; }
+  #macPtr { position: absolute; left: 0; top: 0; pointer-events: none; z-index: 1; will-change: transform; }
   #bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 3;
-    display: flex; gap: 10px; align-items: center; padding: 6px 12px;
+    display: flex; gap: 10px; align-items: center; padding: 6px 12px; white-space: nowrap;
     background: rgba(28, 28, 30, .9); border-radius: 0 0 10px 10px; transition: opacity .25s; }
   #bar.hidden { opacity: 0; pointer-events: none; }
   #bar button { background: #3a3a3c; color: inherit; border: 0; border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer; }
@@ -25,84 +27,124 @@
   #msg code { background: #2c2c2e; padding: 2px 6px; border-radius: 4px; user-select: all; }
 </style>
 </head>
-<body class="input">
+<body>
 <div id="bar">
   <span id="stats">connecting…</span>
   <label title="Send this PC's mouse and keyboard to the Mac"><input type="checkbox" id="optInput"> Control</label>
   <label title="Ctrl acts as ⌘ Command, Windows key acts as Control"><input type="checkbox" id="optSwap"> Ctrl→⌘</label>
+  <label title="Stream video over WebRTC (UDP) for the lowest latency. Turn off to use the TCP stream instead."><input type="checkbox" id="optUdp"> UDP</label>
   <button id="fs">Fullscreen</button>
 </div>
 <div id="msg"><div>Connecting to your Mac…</div></div>
-<canvas id="screen" width="16" height="9" tabindex="0" style="outline: none"></canvas>
+<div id="stage" tabindex="0">
+  <video id="video" autoplay muted playsinline disablepictureinpicture hidden></video>
+  <canvas id="screen" width="16" height="9" hidden></canvas>
+  <img id="macPtr" alt="" hidden>
+</div>
 
 <script>
 "use strict";
+const stage = document.getElementById("stage");
+const video = document.getElementById("video");
 const canvas = document.getElementById("screen");
 const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
 const msgEl = document.getElementById("msg");
 const statsEl = document.getElementById("stats");
 const bar = document.getElementById("bar");
 
-const opts = { input: true, swap: true };
+const HAS_RTC = "RTCPeerConnection" in window;
+const HAS_WEBCODECS = "VideoDecoder" in window;
+
+const opts = { input: true, swap: true, udp: false };  // TCP measured lower on a clean network; UDP rides out packet loss better
 try { Object.assign(opts, JSON.parse(localStorage.getItem("panebridge") || "{}")); } catch (_) {}
 const saveOpts = () => { try { localStorage.setItem("panebridge", JSON.stringify(opts)); } catch (_) {} };
 const optInput = document.getElementById("optInput");
 const optSwap = document.getElementById("optSwap");
-optInput.checked = opts.input; optSwap.checked = opts.swap;
-document.body.classList.toggle("input", opts.input);
-optInput.onchange = () => { opts.input = optInput.checked; document.body.classList.toggle("input", opts.input); saveOpts(); };
+const optUdp = document.getElementById("optUdp");
+optInput.checked = opts.input; optSwap.checked = opts.swap; optUdp.checked = opts.udp && HAS_RTC;
+optUdp.disabled = !HAS_RTC || !HAS_WEBCODECS;  // nothing to switch between
+optInput.onchange = () => { opts.input = optInput.checked; saveOpts(); sendControl(); applyCursor(); };
 optSwap.onchange = () => { opts.swap = optSwap.checked; saveOpts(); };
+optUdp.onchange = () => { opts.udp = optUdp.checked; saveOpts(); chooseTransport(); };
 
 function showMsg(html) { msgEl.firstElementChild.innerHTML = html; msgEl.hidden = false; }
 
-if (!("VideoDecoder" in window)) {
-  const origin = location.origin;
-  showMsg(`<p><b>This browser blocked the video decoder</b> because the page isn't served over HTTPS.</p>
+const FLAG_HELP = () => `<p><b>This browser blocked the video decoder</b> because the page isn't served over HTTPS.</p>
     <p>One-time fix in Chrome or Edge:</p>
     <p>1. Open <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code><br>
        (in Edge: <code>edge://flags/#unsafely-treat-insecure-origin-as-secure</code>)</p>
-    <p>2. Paste <code>${origin}</code> into the box and set it to <b>Enabled</b></p>
-    <p>3. Click <b>Relaunch</b>, then reopen this page.</p>`);
-  throw new Error("WebCodecs unavailable");
-}
+    <p>2. Paste <code>${location.origin}</code> into the box and set it to <b>Enabled</b></p>
+    <p>3. Click <b>Relaunch</b>, then reopen this page.</p>`;
 
-// ---------- video ----------
-let ws = null, decoder = null, codec = null, vw = 0, vh = 0, waitingKey = true;
-let frames = 0, bytes = 0;
+if (!HAS_RTC && !HAS_WEBCODECS) { showMsg(FLAG_HELP()); throw new Error("no video path"); }
+
+// ---------- shared state ----------
+let ws = null, vw = 0, vh = 0, pointW = 0, serverInput = true, codec = null;
+let mode = null;            // "rtc" (WebRTC/UDP) or "ws" (WebCodecs over the WebSocket/TCP)
+let frames = 0, bytes = 0, latSum = 0, latN = 0;
 
 function layout() {
   if (!vw) return;
   const s = Math.min(innerWidth / vw, innerHeight / vh);
   const w = Math.floor(vw * s), h = Math.floor(vh * s);
-  Object.assign(canvas.style, { width: w + "px", height: h + "px",
+  Object.assign(stage.style, { width: w + "px", height: h + "px",
     left: Math.floor((innerWidth - w) / 2) + "px", top: Math.floor((innerHeight - h) / 2) + "px" });
+  applyCursor();
+  placeMacPointer();
 }
 addEventListener("resize", layout);
 
 function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
-function requestKey() { send({ type: "keyframe" }); }
+function sendControl() { send({ type: "control", localCursor: opts.input }); }
+function frameShown() { frames++; if (!msgEl.hidden) msgEl.hidden = true; }
 
-function setupDecoder() {
+// ---------- clock sync (for the latency readout) ----------
+// The Mac stamps every frame with its capture time. Pings estimate the offset between the
+// two clocks; the sample with the smallest round trip is the most accurate.
+let clockSamples = [], clockOffset = null, rttMs = null;
+const nowMicros = () => performance.now() * 1000;
+function ping() { send({ type: "ping", t: nowMicros() }); }
+function onPong(m) {
+  const now = nowMicros(), rtt = now - m.t;
+  clockSamples.push({ rtt, offset: m.s - (m.t + rtt / 2) });
+  if (clockSamples.length > 10) clockSamples.shift();
+  const best = clockSamples.reduce((a, b) => (b.rtt < a.rtt ? b : a));
+  clockOffset = best.offset; rttMs = rtt / 1000;
+}
+setInterval(ping, 2000);
+
+// ---------- WebCodecs path (TCP) ----------
+let decoder = null, waitingKey = true, hwPref = "prefer-hardware";
+
+async function setupDecoder() {
+  if (!HAS_WEBCODECS || !codec) return;
   if (decoder && decoder.state !== "closed") { try { decoder.close(); } catch (_) {} }
   decoder = new VideoDecoder({
     output(frame) {
+      // Drawing straight away on a desynchronized canvas is the lowest-latency way to show it.
       ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      if (clockOffset !== null) { latSum += (nowMicros() + clockOffset - frame.timestamp) / 1000; latN++; }
       frame.close();
-      frames++;
-      if (!msgEl.hidden) msgEl.hidden = true;
+      frameShown();
     },
     error(e) {
       console.warn("decoder error", e);
-      setTimeout(() => { setupDecoder(); requestKey(); }, 100);
+      hwPref = "no-preference";
+      setTimeout(() => { if (mode === "ws") { setupDecoder(); requestKey(); } }, 100);
     },
   });
-  decoder.configure({ codec, optimizeForLatency: true });  // no description => Annex-B input
+  let config = { codec, optimizeForLatency: true, hardwareAcceleration: hwPref };
+  try { if (!(await VideoDecoder.isConfigSupported(config)).supported) delete config.hardwareAcceleration; }
+  catch (_) { delete config.hardwareAcceleration; }
+  decoder.configure(config);  // no description => Annex-B input
   waitingKey = true;
 }
+function requestKey() { send({ type: "keyframe" }); }
 
 function onFrame(buf) {
+  if (mode !== "ws") return;
   const dv = new DataView(buf);
   if (dv.getUint8(0) !== 1) return;
   const key = dv.getUint8(1) === 1;
@@ -117,21 +159,141 @@ function onFrame(buf) {
   decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp, data: new Uint8Array(buf, 10) }));
 }
 
+function useWs() {
+  stopRtc();
+  mode = "ws";
+  video.hidden = true; canvas.hidden = false;
+  if (!HAS_WEBCODECS) { showMsg(FLAG_HELP()); return; }
+  send({ type: "transport", mode: "ws" });
+  if (codec) { setupDecoder(); requestKey(); }
+}
+
+// ---------- WebRTC path (UDP) ----------
+let pc = null, rtcTimer = 0, pendingIce = [], lastStats = null;
+
+function stopRtc() {
+  clearTimeout(rtcTimer);
+  if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+  video.srcObject = null;
+  pendingIce = []; prevRtc = null;
+}
+
+async function useRtc() {
+  stopRtc();
+  if (decoder && decoder.state !== "closed") { try { decoder.close(); } catch (_) {} }
+  mode = "rtc";
+  canvas.hidden = true; video.hidden = false;
+  send({ type: "transport", mode: "webrtc" });
+
+  const conn = pc = new RTCPeerConnection({ iceServers: [] });
+  const tr = conn.addTransceiver("video", { direction: "recvonly" });
+  try {  // prefer H.264 (hardware decode on most PCs), then VP8
+    const rank = (c) => c.mimeType === "video/H264" ? (/packetization-mode=1/.test(c.sdpFmtpLine || "") ? 0 : 1)
+      : c.mimeType === "video/VP8" ? 2 : 3;
+    tr.setCodecPreferences(RTCRtpReceiver.getCapabilities("video").codecs.slice().sort((a, b) => rank(a) - rank(b)));
+  } catch (_) {}
+
+  conn.ontrack = (e) => {
+    // Ask Chrome to play frames as soon as they arrive instead of buffering for smoothness.
+    try { e.receiver.jitterBufferTarget = 0; } catch (_) {}
+    try { e.receiver.playoutDelayHint = 0; } catch (_) {}
+    video.srcObject = new MediaStream([e.track]);
+    video.play().catch(() => {});
+    video.onplaying = () => { msgEl.hidden = true; };
+  };
+  conn.onicecandidate = (e) => {
+    if (e.candidate) send({ type: "rtc-ice", candidate: e.candidate.candidate,
+      sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex });
+  };
+  conn.onconnectionstatechange = () => {
+    if (pc !== conn) return;
+    if (conn.connectionState === "connected") clearTimeout(rtcTimer);
+    if (conn.connectionState === "failed") fallback("WebRTC connection failed");
+  };
+  rtcTimer = setTimeout(() => { if (pc === conn && conn.connectionState !== "connected") fallback("WebRTC timed out"); }, 8000);
+
+  const offer = await conn.createOffer();
+  await conn.setLocalDescription(offer);
+  send({ type: "rtc-offer", sdp: conn.localDescription.sdp });
+}
+
+function fallback(why) {
+  console.warn(why + "; falling back to TCP");
+  if (HAS_WEBCODECS) useWs();
+  else showMsg(`<p>Couldn't start the low-latency (UDP) stream: ${why}.</p>` + FLAG_HELP());
+}
+
+async function onRtcSignal(m) {
+  if (!pc) return;
+  if (m.type === "rtc-answer") {
+    await pc.setRemoteDescription({ type: "answer", sdp: m.sdp });
+    for (const c of pendingIce) pc.addIceCandidate(c).catch(() => {});
+    pendingIce = [];
+  } else if (m.type === "rtc-ice") {
+    const c = { candidate: m.candidate, sdpMid: m.sdpMid, sdpMLineIndex: m.sdpMLineIndex };
+    if (pc.remoteDescription) pc.addIceCandidate(c).catch(() => {}); else pendingIce.push(c);
+  } else if (m.type === "rtc-error") {
+    fallback(m.message);
+  }
+}
+
+// WebRTC's own receiver stats, as per-second deltas: frames, bytes, jitter-buffer wait and decode time.
+let prevRtc = null;
+async function rtcStats() {
+  if (!pc) return null;
+  let cur = null, pairRtt = null, codecId = null, codecs = {};
+  (await pc.getStats()).forEach((r) => {
+    if (r.type === "inbound-rtp" && r.kind === "video") {
+      cur = { bytes: r.bytesReceived || 0, frames: r.framesDecoded || 0, decode: r.totalDecodeTime || 0,
+              jb: r.jitterBufferDelay || 0, jbN: r.jitterBufferEmittedCount || 0 };
+      codecId = r.codecId;
+    }
+    if (r.type === "codec") codecs[r.id] = r.mimeType;
+    if (r.type === "candidate-pair" && r.nominated && r.state === "succeeded" && r.currentRoundTripTime != null)
+      pairRtt = r.currentRoundTripTime * 1000;
+  });
+  if (!cur) return null;
+  const p = prevRtc; prevRtc = cur;
+  if (!p) return null;
+  const n = cur.frames - p.frames, jbN = cur.jbN - p.jbN;
+  return {
+    fps: n, mbps: (cur.bytes - p.bytes) * 8 / 1e6, pairRtt,
+    codec: (codecs[codecId] || "").replace("video/", ""),
+    jbMs: jbN > 0 ? (cur.jb - p.jb) / jbN * 1000 : 0,
+    decodeMs: n > 0 ? (cur.decode - p.decode) / n * 1000 : 0,
+  };
+}
+
+function chooseTransport() {
+  if (opts.udp && HAS_RTC) useRtc(); else useWs();
+}
+
+// ---------- connection ----------
 function connect() {
   const port = Number(location.port || 80) + 1;
   ws = new WebSocket(`ws://${location.hostname}:${port}`);
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => { statsEl.textContent = "connected"; };
+  ws.onopen = () => {
+    statsEl.textContent = "connected";
+    clockSamples = []; for (let i = 0; i < 5; i++) setTimeout(ping, i * 100);
+    sendControl();
+    chooseTransport();
+  };
   ws.onmessage = (e) => {
     if (typeof e.data !== "string") return onFrame(e.data);
     const m = JSON.parse(e.data);
     if (m.type === "config") {
-      codec = m.codec; vw = m.width; vh = m.height;
+      vw = m.width; vh = m.height; pointW = m.pointWidth || vw; serverInput = m.input !== false;
       canvas.width = vw; canvas.height = vh;
-      layout(); setupDecoder(); requestKey();
-    }
+      layout();
+      if (m.codec && m.codec !== codec) { codec = m.codec; if (mode === "ws") { setupDecoder(); requestKey(); } }
+    } else if (m.type === "pong") onPong(m);
+    else if (m.type === "cursor") setCursorImage(m);
+    else if (m.type === "pointer") onMacPointer(m);
+    else if (m.type && m.type.startsWith("rtc-")) onRtcSignal(m);
   };
   ws.onclose = () => {
+    stopRtc(); mode = null;
     statsEl.textContent = "reconnecting…";
     showMsg("Lost connection to the Mac. Reconnecting…");
     setTimeout(connect, 1000);
@@ -139,11 +301,89 @@ function connect() {
 }
 connect();
 
-setInterval(() => {
-  if (ws && ws.readyState === WebSocket.OPEN && vw)
-    statsEl.textContent = `${vw}×${vh} · ${frames} fps · ${(bytes * 8 / 1e6).toFixed(1)} Mbps`;
-  frames = 0; bytes = 0;
+setInterval(async () => {
+  if (!(ws && ws.readyState === WebSocket.OPEN && vw)) { frames = 0; bytes = 0; return; }
+  let mbps = bytes * 8 / 1e6, lat = null, label = "TCP";
+  if (mode === "rtc") {
+    const s = await rtcStats();
+    label = s && s.codec ? `UDP ${s.codec}` : "UDP";
+    if (s) {
+      mbps = s.mbps; frames = s.fps;
+      if (s.fps > 0 && !msgEl.hidden) msgEl.hidden = true;
+      // Estimate: half the network round trip + jitter-buffer wait + decode, plus ~4 ms to encode
+      // on the Mac and ~half a refresh to reach the screen.
+      const net = s.pairRtt != null ? s.pairRtt / 2 : rttMs != null ? rttMs / 2 : 0;
+      if (s.fps > 0) lat = "≈" + Math.round(net + s.jbMs + s.decodeMs + 4 + 8) + " ms";
+    }
+  } else if (latN) {
+    lat = Math.round(latSum / latN) + " ms";   // capture on the Mac -> drawn here
+  }
+  statsEl.textContent = [label, `${vw}×${vh}`, `${frames} fps`, `${mbps.toFixed(1)} Mbps`, lat && `latency ${lat}`]
+    .filter(Boolean).join(" · ");
+  statsEl.title = "Latency is from the moment the Mac captures a frame until it's drawn on this screen" +
+    (rttMs != null ? `. Network round trip: ${rttMs.toFixed(0)} ms` : "");
+  frames = 0; bytes = 0; latSum = 0; latN = 0;
 }, 1000);
+
+// ---------- local cursor ----------
+// The Mac tells us its pointer shape; we show it as this PC's own cursor so it moves instantly
+// (the Mac leaves its pointer out of the video while we do this).
+let cursorMsg = null, cursorImg = null, cursorKey = "";
+function setCursorImage(m) {
+  cursorMsg = m;
+  const img = new Image();
+  img.onload = () => { cursorImg = img; cursorKey = ""; applyCursor(); placeMacPointer(); };
+  img.src = "data:image/png;base64," + m.png;
+}
+
+// Shared pointer: when the Mac's own trackpad/mouse moves onto this display, show where it is
+// (the video leaves the pointer out) and hide this PC's cursor. As soon as this PC's mouse moves
+// over the screen again, it takes over.
+const macPtr = document.getElementById("macPtr");
+let macDriving = false, macPos = null, lastPcPos = null;
+function localCursorOn() { return opts.input && serverInput; }
+function onMacPointer(m) {
+  if (!localCursorOn()) return;  // the video already shows the pointer then
+  if (m.visible) { macDriving = true; macPos = m; } else { macPos = null; }
+  placeMacPointer();
+  applyCursor();
+}
+function placeMacPointer() {
+  if (!macDriving || !macPos || !cursorImg || !cursorMsg || !vw || !localCursorOn()) { macPtr.hidden = true; return; }
+  const r = stage.getBoundingClientRect(), k = r.width / pointW;
+  if (macPtr.src !== cursorImg.src) macPtr.src = cursorImg.src;
+  macPtr.style.width = cursorMsg.w * k + "px";
+  macPtr.style.height = cursorMsg.h * k + "px";
+  macPtr.style.transform = `translate(${macPos.x * r.width - cursorMsg.hx * k}px, ${macPos.y * r.height - cursorMsg.hy * k}px)`;
+  macPtr.hidden = false;
+}
+function pcTakesOver(e) {
+  // Chrome sometimes fires pointermove without the mouse moving (e.g. when content changes
+  // underneath), so only a real change of position counts.
+  const moved = !lastPcPos || lastPcPos.x !== e.clientX || lastPcPos.y !== e.clientY;
+  lastPcPos = { x: e.clientX, y: e.clientY };
+  if (!moved || !macDriving) return;
+  macDriving = false;
+  placeMacPointer();
+  applyCursor();
+}
+
+function applyCursor() {
+  if (!opts.input || !serverInput) { stage.style.cursor = "default"; placeMacPointer(); return; }
+  if (macDriving) { stage.style.cursor = "none"; cursorKey = ""; return; }
+  if (!cursorImg || !cursorMsg || !vw) { stage.style.cursor = "default"; return; }
+  const k = stage.getBoundingClientRect().width / pointW;  // CSS px per Mac point
+  const w = Math.max(1, Math.min(128, Math.round(cursorMsg.w * k)));
+  const h = Math.max(1, Math.min(128, Math.round(cursorMsg.h * k)));
+  const key = `${cursorMsg.png.length}:${w}x${h}:${cursorMsg.hx},${cursorMsg.hy}`;
+  if (key === cursorKey) return;
+  cursorKey = key;
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  c.getContext("2d").drawImage(cursorImg, 0, 0, w, h);
+  const hx = Math.min(w - 1, Math.round(cursorMsg.hx * k)), hy = Math.min(h - 1, Math.round(cursorMsg.hy * k));
+  stage.style.cursor = `url(${c.toDataURL()}) ${hx} ${hy}, default`;
+}
 
 // ---------- toolbar ----------
 let barTimer = 0;
@@ -172,33 +412,36 @@ function mods(e) {
     : { cmd: e.metaKey, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey };
 }
 function pos(e) {
-  const r = canvas.getBoundingClientRect();
+  const r = stage.getBoundingClientRect();
   return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
 }
 
 let lastDown = { t: 0, x: 0, y: 0, clicks: 0 };
-canvas.addEventListener("pointerdown", (e) => {
+stage.addEventListener("pointerdown", (e) => {
   if (!opts.input || !vw) return;
   e.preventDefault();
+  if (macDriving) { lastPcPos = null; pcTakesOver(e); }
   // preventDefault stops the browser moving focus, so a toolbar button/checkbox clicked
   // earlier would keep it and swallow every key. Take focus back explicitly.
-  canvas.focus({ preventScroll: true });
-  canvas.setPointerCapture(e.pointerId);
+  stage.focus({ preventScroll: true });
+  stage.setPointerCapture(e.pointerId);
   const now = performance.now();
   const near = Math.abs(e.clientX - lastDown.x) < 5 && Math.abs(e.clientY - lastDown.y) < 5;
   lastDown = { t: now, x: e.clientX, y: e.clientY, clicks: now - lastDown.t < 400 && near ? lastDown.clicks + 1 : 1 };
   send({ type: "mouse", action: "down", button: e.button, clicks: lastDown.clicks, ...pos(e), mods: mods(e) });
 });
-canvas.addEventListener("pointerup", (e) => {
+stage.addEventListener("pointerup", (e) => {
   if (!opts.input || !vw) return;
   send({ type: "mouse", action: "up", button: e.button, clicks: lastDown.clicks, ...pos(e), mods: mods(e) });
 });
-canvas.addEventListener("pointermove", (e) => {
-  if (!opts.input || !vw || !ws || ws.bufferedAmount > 65536) return;
+stage.addEventListener("pointermove", (e) => {
+  if (!opts.input || !vw) return;
+  pcTakesOver(e);
+  if (!ws || ws.bufferedAmount > 65536) return;
   send({ type: "mouse", action: "move", ...pos(e), mods: mods(e) });
 });
-canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-canvas.addEventListener("wheel", (e) => {
+stage.addEventListener("contextmenu", (e) => e.preventDefault());
+stage.addEventListener("wheel", (e) => {
   if (!opts.input || !vw) return;
   e.preventDefault();
   const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1;

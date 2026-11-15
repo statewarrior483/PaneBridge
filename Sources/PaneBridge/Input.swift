@@ -7,9 +7,11 @@ final class InputInjector {
     private let displayID: CGDirectDisplayID
     private let source = CGEventSource(stateID: .hidSystemState)
     private var buttonsDown = Set<Int>()
+    private let tracker: PointerTracker?
 
-    init(displayID: CGDirectDisplayID) {
+    init(displayID: CGDirectDisplayID, tracker: PointerTracker? = nil) {
         self.displayID = displayID
+        self.tracker = tracker
     }
 
     func handle(_ msg: [String: Any]) {
@@ -62,6 +64,7 @@ final class InputInjector {
             e.setIntegerValueField(.mouseEventClickState, value: Int64(clicks))
         }
         e.flags = flags(msg)
+        tracker?.noteInjected(p)
         e.post(tap: .cghidEventTap)
     }
 

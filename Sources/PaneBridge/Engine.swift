@@ -14,6 +14,8 @@ final class Engine {
     private var server: StreamServer?
     private var capturer: DisplayCapturer?
     private var injector: InputInjector?
+    private var rtc: RTCStreamer?
+    private var cursorWatcher: CursorWatcher?
     private let inputQueue = DispatchQueue(label: "panebridge.input", qos: .userInteractive)
     /// Keeps macOS from App-Napping a menu-bar app with no visible windows, which
     /// throttles its timers and threads and shows up as stutter.
@@ -39,10 +41,14 @@ final class Engine {
         do {
             let encoder = try H264Encoder(width: o.pixelWidth, height: o.pixelHeight, fps: o.fps,
                                           bitrate: Int(o.bitrateMbps * 1_000_000))
-            let server = StreamServer(page: page, width: o.pixelWidth, height: o.pixelHeight)
+            let server = StreamServer(page: page, width: o.pixelWidth, height: o.pixelHeight,
+                                      pointWidth: o.width, pointHeight: o.height, inputEnabled: o.input)
+            let rtc = RTCStreamer(width: o.pixelWidth, height: o.pixelHeight, fps: o.fps,
+                                  bitrate: Int(o.bitrateMbps * 1_000_000))
             let capturer = DisplayCapturer(displayID: id, pixelWidth: o.pixelWidth, pixelHeight: o.pixelHeight,
                                            fps: o.fps, encoder: encoder)
-            let injector = o.input ? InputInjector(displayID: id) : nil
+            let tracker = PointerTracker()
+            let injector = o.input ? InputInjector(displayID: id, tracker: tracker) : nil
             let inputQueue = self.inputQueue
 
             encoder.onCodec = { [weak server] in server?.setCodec($0) }
@@ -53,6 +59,21 @@ final class Engine {
             capturer.onStop = { [weak self] in self?.onStopped?($0) }
             capturer.shouldHoldFrames = { [weak server] in server?.isBackedUp ?? false }
             server.onDrained = { [weak capturer] in capturer?.flushHeldFrame() }
+            // WebRTC viewers get raw frames; our own encoder only runs for WebSocket viewers.
+            capturer.rawFrameSink = { [weak rtc] in rtc?.push($0, micros: $1) }
+            capturer.wantsEncodedFrames = { [weak server] in server?.wantsEncodedFrames ?? false }
+            rtc.send = { [weak server] in server?.send(json: $1, to: $0) }
+            server.onSignal = { [weak rtc] in rtc?.handle($0, $1) }
+            server.onClientGone = { [weak rtc] in rtc?.remove($0) }
+            // While a PC controls the Mac it draws its own pointer, so leave it out of the video.
+            server.onLocalCursorChanged = { [weak capturer] in capturer?.setShowsCursor(!$0) }
+            if o.input {
+                let watcher = CursorWatcher(displayID: id, tracker: tracker)
+                watcher.onChange = { [weak server] in server?.setCursor(json: $0) }
+                watcher.onPointer = { [weak server] in server?.send(json: $0, to: nil) }
+                watcher.start()
+                cursorWatcher = watcher
+            }
             activity = ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiated, .latencyCritical],
                 reason: "Streaming the PaneBridge display")
@@ -61,6 +82,7 @@ final class Engine {
             self.server = server
             self.capturer = capturer
             self.injector = injector
+            self.rtc = rtc
 
             do {
                 try server.start(port: o.port)
@@ -82,8 +104,12 @@ final class Engine {
     func stop() {
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
         activity = nil
+        cursorWatcher?.stop()
+        cursorWatcher = nil
         capturer?.stop()
         server?.stop()
+        rtc?.stop()
+        rtc = nil
         capturer = nil
         server = nil
         encoder = nil

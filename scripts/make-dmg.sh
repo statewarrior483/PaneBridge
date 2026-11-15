@@ -16,6 +16,11 @@ echo "==> Assembling $APP"
 rm -rf dist && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/PaneBridge" "$APP/Contents/MacOS/PaneBridge"
 cp Sources/PaneBridge/Resources/client.html "$APP/Contents/Resources/client.html"
+# WebRTC (low-latency UDP video) ships as a framework next to the binary.
+WEBRTC=$(find .build/artifacts -path "*macos*/WebRTC.framework" -maxdepth 6 -type d | head -1)
+[ -n "$WEBRTC" ] || { echo "WebRTC.framework not found; run: swift package resolve" >&2; exit 1; }
+mkdir -p "$APP/Contents/Frameworks"
+ditto "$WEBRTC" "$APP/Contents/Frameworks/WebRTC.framework"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

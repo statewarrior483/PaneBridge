@@ -100,6 +100,8 @@ Then open the URL and click **Fullscreen** in the toolbar. The toolbar hides its
 
 - **Control** sends the PC's mouse, scroll wheel and keyboard to the Mac.
 - **Ctrl→⌘** makes Ctrl act as ⌘ Command, so Ctrl+C/Ctrl+V do what you expect. The Windows key becomes Control.
+- **UDP** streams the video over WebRTC instead of the TCP stream. On a clean network TCP is slightly faster; on patchy Wi-Fi, UDP avoids the "freeze then catch up" stutter because a lost packet only costs one frame. Try both and compare.
+- The toolbar shows a live **latency** figure (Mac capture → your screen). Over TCP it's measured exactly; over UDP it's an estimate (≈). While **Control** is on, the pointer is drawn by the PC itself (in the Mac's current cursor shape), so it moves with no lag.
 
 Windows may ask to allow the browser through the firewall. On the Mac, allow incoming connections if asked.
 
@@ -107,7 +109,7 @@ Windows may ask to allow the browser through the firewall. On the Mac, allow inc
 
 ```bash
 ./scripts/setup-signing.sh    # once: private self-signed signing certificate, kept outside the repo
-./scripts/make-dmg.sh 0.2.4   # -> dist/PaneBridge-0.2.2.dmg (universal: Apple Silicon + Intel)
+./scripts/make-dmg.sh 0.3.1   # -> dist/PaneBridge-0.3.1.dmg (universal: Apple Silicon + Intel)
 PANEBRIDGE_SNAPSHOT=docs .build/release/PaneBridge   # re-render the screenshots above
 ```
 
@@ -115,12 +117,13 @@ PANEBRIDGE_SNAPSHOT=docs .build/release/PaneBridge   # re-render the screenshots
 
 - **Wired is best.** Ethernet on either side, or both on 5 GHz Wi-Fi, makes a big difference to lag.
 - If your Mac's IP changes, you need to update the Chrome flag. Giving the Mac a reserved IP in your router avoids this.
-- If you see stutter, try `--fps 30` or a lower `--bitrate`.
+- If you see stutter, turn on **UDP** in the viewer toolbar, or lower the bitrate (or frame rate) in Settings. Turning off Retina sends a quarter of the pixels.
 
 ## Limitations / ideas for later
 
 - Uses `CGVirtualDisplay`, a private macOS API (the same one other virtual-monitor apps use). It works for personal use but couldn't ship on the App Store and could break in a future macOS.
 - Video is unencrypted on a plain LAN connection, so don't use the `192.168.x.x` URL on public Wi-Fi. Over Tailscale it's encrypted.
+- The UDP mode bundles Google's WebRTC library ([stasel/WebRTC](https://github.com/stasel/WebRTC) build, BSD licence), which adds about 13 MB to the download.
 - The app is signed with a self-signed certificate, not notarized by Apple, so the first launch needs right-click → Open.
 - Possible next steps: a menu-bar app wrapper, HTTPS with a self-signed certificate (removes the flag step), a native Windows viewer, USB-C/Thunderbolt networking, audio.
 

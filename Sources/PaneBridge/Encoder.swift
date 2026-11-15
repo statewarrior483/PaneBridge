@@ -16,6 +16,7 @@ final class H264Encoder {
     private let lock = NSLock()
     private var forceKeyframe = true
     private var codecString: String?
+    private var lastMicros: Int64 = 0
 
     init(width: Int, height: Int, fps: Int, bitrate: Int) throws {
         session = try Self.makeSession(width: width, height: height, lowLatency: true)
@@ -36,6 +37,9 @@ final class H264Encoder {
         set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 30 as CFNumber)
         // Cap bursts at 2x the average over one second.
         set(kVTCompressionPropertyKey_DataRateLimits, [bitrate * 2 / 8, 1] as CFArray)
+        // Emit each frame as soon as it's encoded and favour speed over squeezing out bits.
+        set(kVTCompressionPropertyKey_MaxFrameDelayCount, 0 as CFNumber)
+        set(kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanTrue)
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
 
@@ -64,11 +68,14 @@ final class H264Encoder {
     }
 
     /// Call from one serial queue only.
-    func encode(_ pixelBuffer: CVPixelBuffer) {
+    /// `captureMicros` is when the frame was captured (host clock); viewers use it to measure latency.
+    func encode(_ pixelBuffer: CVPixelBuffer, captureMicros: Int64) {
         guard let session else { return }
         lock.lock(); let key = forceKeyframe; forceKeyframe = false; lock.unlock()
 
-        let micros = Int64(CACurrentMediaTime() * 1_000_000)
+        // Timestamps must increase; a re-sent old frame gets "now" from the caller.
+        let micros = max(captureMicros, lastMicros + 1)
+        lastMicros = micros
         let pts = CMTime(value: micros, timescale: 1_000_000)
         let props = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
 
