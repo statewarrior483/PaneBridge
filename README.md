@@ -107,7 +107,7 @@ Windows may ask to allow the browser through the firewall. On the Mac, allow inc
 
 ```bash
 ./scripts/setup-signing.sh    # once: private self-signed signing certificate, kept outside the repo
-./scripts/make-dmg.sh 0.2.2   # -> dist/PaneBridge-0.2.2.dmg (universal: Apple Silicon + Intel)
+./scripts/make-dmg.sh 0.2.4   # -> dist/PaneBridge-0.2.2.dmg (universal: Apple Silicon + Intel)
 PANEBRIDGE_SNAPSHOT=docs .build/release/PaneBridge   # re-render the screenshots above
 ```
 

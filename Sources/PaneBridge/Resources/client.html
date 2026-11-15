@@ -33,7 +33,7 @@
   <button id="fs">Fullscreen</button>
 </div>
 <div id="msg"><div>Connecting to your Mac…</div></div>
-<canvas id="screen" width="16" height="9"></canvas>
+<canvas id="screen" width="16" height="9" tabindex="0" style="outline: none"></canvas>
 
 <script>
 "use strict";
@@ -156,6 +156,8 @@ addEventListener("pointermove", (e) => { if (e.clientY < 48) pokeBar(); });
 bar.addEventListener("pointerleave", pokeBar);
 pokeBar();
 
+for (const el of bar.querySelectorAll("button, input")) el.addEventListener("click", () => el.blur());
+
 document.getElementById("fs").onclick = async () => {
   if (document.fullscreenElement) return document.exitFullscreen();
   await document.documentElement.requestFullscreen();
@@ -178,6 +180,9 @@ let lastDown = { t: 0, x: 0, y: 0, clicks: 0 };
 canvas.addEventListener("pointerdown", (e) => {
   if (!opts.input || !vw) return;
   e.preventDefault();
+  // preventDefault stops the browser moving focus, so a toolbar button/checkbox clicked
+  // earlier would keep it and swallow every key. Take focus back explicitly.
+  canvas.focus({ preventScroll: true });
   canvas.setPointerCapture(e.pointerId);
   const now = performance.now();
   const near = Math.abs(e.clientX - lastDown.x) < 5 && Math.abs(e.clientY - lastDown.y) < 5;
@@ -203,7 +208,7 @@ canvas.addEventListener("wheel", (e) => {
 const MODIFIER_CODES = /^(Shift|Control|Alt|Meta|OS)(Left|Right)?$/;
 function onKey(e) {
   if (!opts.input || !vw) return;
-  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLButtonElement) return;
+  if (e.target instanceof HTMLElement && e.target.closest("#bar")) e.target.blur();  // toolbar never eats keys
   e.preventDefault();
   if (MODIFIER_CODES.test(e.code)) return;  // sent as flags with other keys
   send({ type: "key", action: e.type === "keydown" ? "down" : "up", code: e.code, mods: mods(e) });
